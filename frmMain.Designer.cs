@@ -37,6 +37,7 @@
             this.rbGDrive = new System.Windows.Forms.RadioButton();
             this.btnCheckDup = new System.Windows.Forms.Button();
             this.lbDir = new System.Windows.Forms.Label();
+            this.btnCompare = new System.Windows.Forms.Button();
             ((System.ComponentModel.ISupportInitialize)(this.olvFiles)).BeginInit();
             this.SuspendLayout();
             // 
@@ -56,10 +57,10 @@
             this.olvFiles.Cursor = System.Windows.Forms.Cursors.Default;
             this.olvFiles.FullRowSelect = true;
             this.olvFiles.GridLines = true;
-            this.olvFiles.Location = new System.Drawing.Point(12, 77);
+            this.olvFiles.Location = new System.Drawing.Point(12, 74);
             this.olvFiles.Name = "olvFiles";
             this.olvFiles.ShowGroups = false;
-            this.olvFiles.Size = new System.Drawing.Size(452, 372);
+            this.olvFiles.Size = new System.Drawing.Size(452, 375);
             this.olvFiles.TabIndex = 0;
             this.olvFiles.UseCompatibleStateImageBehavior = false;
             this.olvFiles.View = System.Windows.Forms.View.Details;
@@ -135,11 +136,21 @@
             // lbDir
             // 
             this.lbDir.AutoSize = true;
-            this.lbDir.Location = new System.Drawing.Point(12, 43);
+            this.lbDir.Location = new System.Drawing.Point(12, 47);
             this.lbDir.Name = "lbDir";
             this.lbDir.Size = new System.Drawing.Size(38, 15);
             this.lbDir.TabIndex = 4;
             this.lbDir.Text = "label1";
+            // 
+            // btnCompare
+            // 
+            this.btnCompare.Location = new System.Drawing.Point(389, 41);
+            this.btnCompare.Name = "btnCompare";
+            this.btnCompare.Size = new System.Drawing.Size(75, 27);
+            this.btnCompare.TabIndex = 1;
+            this.btnCompare.Text = "Compare";
+            this.btnCompare.UseVisualStyleBackColor = true;
+            this.btnCompare.Click += new System.EventHandler(this.btnCompare_Click);
             // 
             // frmMain
             // 
@@ -151,6 +162,7 @@
             this.Controls.Add(this.btnCheckDup);
             this.Controls.Add(this.rbGDrive);
             this.Controls.Add(this.rbOneDrive);
+            this.Controls.Add(this.btnCompare);
             this.Controls.Add(this.btnSaveHash);
             this.Controls.Add(this.olvFiles);
             this.Font = new System.Drawing.Font("Segoe UI", 9F, System.Drawing.FontStyle.Regular, System.Drawing.GraphicsUnit.Point, ((byte)(0)));
@@ -176,6 +188,7 @@
         private System.Windows.Forms.RadioButton rbGDrive;
         private System.Windows.Forms.Button btnCheckDup;
         private System.Windows.Forms.Label lbDir;
+        private System.Windows.Forms.Button btnCompare;
     }
 }
 

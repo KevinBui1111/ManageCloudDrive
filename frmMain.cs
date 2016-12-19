@@ -30,9 +30,11 @@ namespace ManageCloudDrive
 
         static readonly string[] Scopes = { "onedrive.readonly", "wl.signin" };
         IOneDriveClient oneDriveClient;
-        KFile root;
+        KFile rootLocal, rootCloud;
         KFile currentItem;
-        const string bookFile = "bookdb.db";
+        const string DATA_ONE_DRIVE = "dataOneDrive.db";
+        const string DATA_GDRIVE = "dataGDrive.db";
+
         List<DItem> dupList;
         string dirCompare;
 
@@ -53,91 +55,117 @@ namespace ManageCloudDrive
                 olvFiles.ListViewItemSorter = new KColumnComparer(column, order);
             };
         }
-
-        async Task get_authorize()
+        private async void frmMain_DragDrop(object sender, DragEventArgs e)
         {
-            var msaAuthProvider = new MsaAuthenticationProvider(
-                MsaClientId,
-                MsaReturnUrl,
-                Scopes,
-                new CredentialVault(MsaClientId)
-            );
-            try
-            {
-                await msaAuthProvider.RestoreMostRecentFromCacheOrAuthenticateUserAsync();
-            }
-            catch (ServiceException ex)
-            {
-                MessageBox.Show(
-                        ex.Error.Message,
-                        "Authentication failed",
-                        MessageBoxButtons.OK);
-            }
-            oneDriveClient = new OneDriveClient("https://api.onedrive.com/v1.0", msaAuthProvider);
+            lbDir.Text = dirCompare = ((string[])e.Data.GetData(DataFormats.FileDrop))[0];
 
+            var dir = await JobWalkDirectories.LoadFolderAsync(dirCompare);
+            rootLocal = new KFile();
+            rootLocal.Children.Add(dir);
+            dir.Parent = rootLocal;
+            show_folder_grid(rootLocal);
         }
-        async Task get_children(DItem dItem)
+        private void frmMain_DragEnter(object sender, DragEventArgs e)
         {
-            IItemRequestBuilder irb = string.IsNullOrEmpty(dItem.Id) ?
-                oneDriveClient.Drive.Root : oneDriveClient.Drive.Items[dItem.Id];
+            string folder = ((string[])e.Data.GetData(DataFormats.FileDrop))[0];
+            bool is_folder = Directory.Exists(folder);
+            if (is_folder && e.Data.GetDataPresent(DataFormats.FileDrop))
+                e.Effect = DragDropEffects.Copy;
+        }
 
+        private async void rbOneDrive_CheckedChanged(object sender, EventArgs e)
+        {
+            string fileload = rbOneDrive.Checked ? DATA_ONE_DRIVE : DATA_GDRIVE;
             try
             {
-                var children = await irb.Children.Request()
-                    .Select("id,name,createdDateTime,size,file,folder,parentReference,webUrl")
-                    .GetAsync();
-
-                List<Task> tasks = new List<Task>();
-                foreach(var item in children)
+                using (var stream = System.IO.File.Open(fileload, FileMode.Open))
                 {
-                    DItem child = new DItem
-                    {
-                        Id = item.Id,
-                        Name = item.Name,
-                        Size = item.Size,
-                        WebUrl = item.WebUrl,
-                        Checksum = item.File != null && item.File.Hashes != null ? item.File.Hashes.Crc32Hash : null,
-                        CreatedDate = item.CreatedDateTime.Value.DateTime,
-                        Path = item.ParentReference.Path,
+                    BinaryFormatter bformatter = new BinaryFormatter();
+                    rootCloud = (DItem)bformatter.Deserialize(stream);
 
-                        IsFolder = item.Folder != null,
-
-                        Parent = dItem
-                    };
-
-                    dItem.Children.Add(child);
-
-                    if (!child.IsFolder)
-                        child.CountFile = 1;
-                    else if (item.Folder.ChildCount > 0)
-                        tasks.Add(get_children(child));
+                    show_folder_grid(rootCloud);
                 }
-
-                await Task.WhenAll(tasks);
-
-                dItem.Size = dItem.Children.Sum(i => i.Size);
-                dItem.CountFile = dItem.Children.Sum(i => i.CountFile);
             }
-            catch (ServiceException ex)
+            catch (FileNotFoundException)
             {
-                MessageBox.Show(ex.Error.Message);
+                if (rbOneDrive.Checked)
+                    await OneDrive();
+                else if (rbGDrive.Checked)
+                    await GDrive();
             }
         }
 
-        void GDrive()
+        private void btnSaveHash_Click(object sender, EventArgs e)
+        {
+            var selected = (DItem)olvFiles.SelectedObject;
+            selected = selected ?? (DItem)rootCloud;
+
+            StringBuilder fileContent = new StringBuilder();
+            SaveMD5(selected, null, fileContent);
+
+            System.IO.File.WriteAllText("res.txt", fileContent.ToString());
+            MessageBox.Show("Save hash successfully!");
+        }
+        private void btnCheckDup_Click(object sender, EventArgs e)
+        {
+            dupList = new List<DItem>();
+            CheckDuplicate((DItem)rootCloud);
+            if (dupList.Count > 0)
+                MessageBox.Show("There are some duplicated files.");
+        }
+        private void btnCompare_Click(object sender, EventArgs e)
+        {
+            ListComparer c = new ListComparer();
+            var res = c.CompareFolder(rootLocal.Children[0], currentItem);
+            show_folder_grid((KFile)res);
+        }
+
+        private void olvFiles_FormatRow(object sender, FormatRowEventArgs e)
+        {
+            KFile item = (KFile)e.Model;
+            switch (item.operation)
+            {
+                case Operation.CHANGED:
+                    e.Item.ForeColor = Color.DarkMagenta;
+                    break;
+                case Operation.NEW:
+                    e.Item.ForeColor = Color.RoyalBlue;
+                    break;
+                case Operation.DELETE:
+                    e.Item.ForeColor = Color.Crimson;
+                    break;
+            }
+        }
+        private void olvFiles_DoubleClick(object sender, EventArgs e)
+        {
+            var item = (KFile)olvFiles.SelectedObjects[0];
+            if (item.Name == "..")
+            {
+                show_folder_grid((KFile)item.Parent);
+                olvFiles.SelectedObject = currentItem;
+                currentItem = (KFile)item.Parent;
+            }
+            else
+            {
+                show_folder_grid(item);
+                currentItem = item;
+            }
+        }
+
+        async Task GDrive()
         {
             UserCredential credential;
 
             using (var stream = new FileStream("client_secret.json", FileMode.Open, FileAccess.Read))
             {
-                credential = GoogleWebAuthorizationBroker
+                credential = await GoogleWebAuthorizationBroker
                     .AuthorizeAsync(
                         GoogleClientSecrets.Load(stream).Secrets,
                         new[] { DriveService.Scope.DriveReadonly },
                         "user",
                         CancellationToken.None,
                         new FileDataStore("oauth/drive"))
-                    .Result;
+                    ;
                 Console.WriteLine("Credential file saved");
             }
 
@@ -150,7 +178,8 @@ namespace ManageCloudDrive
 
             List<DItem> listfiles = new List<DItem>();
             string pageToken = null;
-            do {
+            do
+            {
                 // Define parameters of request.
                 FilesResource.ListRequest request = driveService.Files.List();
                 request.Fields = "nextPageToken, files(id,name,size,mimeType,parents,webViewLink,md5Checksum,createdTime)";
@@ -160,7 +189,7 @@ namespace ManageCloudDrive
                 request.PageSize = 1000;
 
                 // List files.
-                var result = request.Execute();
+                var result = await request.ExecuteAsync();
                 listfiles.AddRange(result.Files.Select(f => new DItem
                 {
                     Id = f.Id,
@@ -179,43 +208,110 @@ namespace ManageCloudDrive
             while (pageToken != null);
 
             Dictionary<string, DItem> dicFolder = listfiles.ToDictionary(i => i.Id);
-            foreach(DItem item in listfiles)
+            foreach (DItem item in listfiles)
             {
                 if (!dicFolder.ContainsKey(item.ParentId))
                 {
-                    root = new DItem();
-                    dicFolder[item.ParentId] = (DItem)root;
+                    rootCloud = new DItem();
+                    dicFolder[item.ParentId] = (DItem)rootCloud;
                 }
 
                 item.Parent = dicFolder[item.ParentId];
                 item.Parent.Children.Add(item);
             }
 
-            CalculateSize((DItem)root);
-            show_folder_grid(root);
-
+            CalculateSize((DItem)rootCloud);
+            show_folder_grid(rootCloud);
+            SaveData(DATA_GDRIVE);
         }
         async Task OneDrive()
         {
+            await get_authorize();
+
+            rootCloud = new DItem();
+            await get_children((DItem)rootCloud);
+            show_folder_grid(rootCloud);
+
+            SaveData(DATA_ONE_DRIVE);
+        }
+        async Task<bool> get_authorize()
+        {
+            var msaAuthProvider = new MsaAuthenticationProvider(
+                MsaClientId,
+                MsaReturnUrl,
+                Scopes,
+                new CredentialVault(MsaClientId)
+            );
             try
             {
-                using (var stream = System.IO.File.Open(bookFile, FileMode.Open))
-                {
-                    BinaryFormatter bformatter = new BinaryFormatter();
-                    root = (DItem)bformatter.Deserialize(stream);
-
-                    show_folder_grid(root);
-                }
+                await msaAuthProvider.RestoreMostRecentFromCacheOrAuthenticateUserAsync();
+                oneDriveClient = new OneDriveClient("https://api.onedrive.com/v1.0", msaAuthProvider);
+                return true;
             }
-            catch (FileNotFoundException)
+            catch (ServiceException ex)
             {
-                await get_authorize();
-
-                root = new DItem();
-                await get_children((DItem)root);
-                SaveData();
+                MessageBox.Show(
+                        ex.Error.Message,
+                        "Authentication failed",
+                        MessageBoxButtons.OK);
+                return false;
             }
         }
+        async Task get_children(DItem dItem)
+        {
+            IItemRequestBuilder irb = string.IsNullOrEmpty(dItem.Id) ?
+                oneDriveClient.Drive.Root : oneDriveClient.Drive.Items[dItem.Id];
+
+            try
+            {
+                List<Task> tasks = new List<Task>();
+                var request = irb.Children.Request()
+                    .Select("id,name,createdDateTime,size,file,folder,parentReference,webUrl");
+                while (request != null)
+                {
+                    var children = await request
+                        .GetAsync();
+
+                    foreach (var item in children)
+                    {
+                        DItem child = new DItem
+                        {
+                            Id = item.Id,
+                            Name = item.Name,
+                            Size = item.Size,
+                            WebUrl = item.WebUrl,
+                            Checksum = item.File != null && item.File.Hashes != null ? item.File.Hashes.Crc32Hash : null,
+                            CreatedDate = item.CreatedDateTime.Value.DateTime,
+                            Path = item.ParentReference.Path,
+
+                            IsFolder = item.Folder != null,
+
+                            Parent = dItem
+                        };
+
+                        dItem.Children.Add(child);
+
+                        if (!child.IsFolder)
+                            child.CountFile = 1;
+                        else if (item.Folder.ChildCount > 0)
+                            tasks.Add(get_children(child));
+                    }
+
+                    // next request if exceed 200 item
+                    request = children.NextPageRequest;
+                }
+
+                await Task.WhenAll(tasks);
+
+                dItem.Size = dItem.Children.Sum(i => ((KFile)i).Size);
+                dItem.CountFile = dItem.Children.Sum(i => ((KFile)i).CountFile);
+            }
+            catch (ServiceException ex)
+            {
+                MessageBox.Show(ex.Error.Message);
+            }
+        }
+
 
         void SaveMD5(DItem item, string path, StringBuilder fileContent)
         {
@@ -238,71 +334,29 @@ namespace ManageCloudDrive
                     child.CountFile = 1;
             }
 
-            item.Size = item.Children.Sum(i => i.Size);
-            item.CountFile = item.Children.Sum(i => i.CountFile);
+            item.Size = item.Children.Sum(i => ((KFile)i).Size);
+            item.CountFile = item.Children.Sum(i => ((KFile)i).CountFile);
         }
         void show_folder_grid(KFile item)
         {
-            if (item != root)
+            if (item.Parent != null)
             {
                 KFile parentFolder = new KFile { Name = "..", Parent = item.Parent };
                 var list = new List<KFile> { parentFolder };
-                list.AddRange(item.Children);
+                list.AddRange(item.Children.Cast<KFile>());
                 olvFiles.SetObjects(list);
             }
             else
                 olvFiles.SetObjects(item.Children);
         }
-        private void btnSaveHash_Click(object sender, EventArgs e)
+        void SaveData(string name)
         {
-            StringBuilder fileContent = new StringBuilder();
-            SaveMD5((DItem)root, null, fileContent);
-
-            System.IO.File.WriteAllText("res.txt", fileContent.ToString());
-        }
-
-        void SaveData()
-        {
-            using (Stream stream = System.IO.File.Open(bookFile, FileMode.Create))
+            using (Stream stream = System.IO.File.Open(name, FileMode.Create))
             {
                 BinaryFormatter bformatter = new BinaryFormatter();
-                bformatter.Serialize(stream, root);
+                bformatter.Serialize(stream, rootCloud);
             }
         }
-
-        private void olvFiles_DoubleClick(object sender, EventArgs e)
-        {
-            var item = (KFile)olvFiles.SelectedObjects[0];
-            if (item.Name == "..")
-            {
-                show_folder_grid(item.Parent);
-                olvFiles.SelectedObject = currentItem;
-                currentItem = item.Parent;
-            }
-            else
-            {
-                show_folder_grid(item);
-                currentItem = item;
-            }
-
-            }
-
-        private async void rbOneDrive_CheckedChanged(object sender, EventArgs e)
-        {
-            if (rbOneDrive.Checked)
-                await OneDrive();
-            else if (rbGDrive.Checked)
-                GDrive();
-        }
-
-        private void btnCheckDup_Click(object sender, EventArgs e)
-        {
-            dupList = new List<DItem>();
-            CheckDuplicate((DItem)root);
-            if (dupList.Count > 0)
-                MessageBox.Show("There are some duplicated files.");
-        }
-
         void CheckDuplicate(DItem item)
         {
             Dictionary<string, int> dicDup = new Dictionary<string, int>();
@@ -311,41 +365,16 @@ namespace ManageCloudDrive
                 if (child.IsFolder)
                 {
                     CheckDuplicate(child);
-                    if (child.Highlight) item.Highlight = true;
+                    if (child.operation == Operation.CHANGED) item.operation = Operation.CHANGED;
                 }
                 else if (dicDup.ContainsKey(child.Name))
                 {
                     dupList.Add(child);
-                    item.Highlight = child.Highlight = true;
+                    item.operation = child.operation = Operation.CHANGED;
                 }
                 else
                     dicDup[child.Name] = 1;
             }
-        }
-
-        private void olvFiles_FormatRow(object sender, FormatRowEventArgs e)
-        {
-            KFile item = (KFile)e.Model;
-            if (item.Highlight) e.Item.ForeColor = Color.Crimson;
-        }
-
-        private async void frmMain_DragDrop(object sender, DragEventArgs e)
-        {
-            lbDir.Text = dirCompare = ((string[])e.Data.GetData(DataFormats.FileDrop))[0];
-
-            var dir = await JobWalkDirectories.LoadFolderAsync(dirCompare);
-            root = new KFile();
-            root.Children.Add(dir);
-            dir.Parent = root;
-            show_folder_grid(root);
-        }
-
-        private void frmMain_DragEnter(object sender, DragEventArgs e)
-        {
-            string folder = ((string[])e.Data.GetData(DataFormats.FileDrop))[0];
-            bool is_folder = Directory.Exists(folder);
-            if (is_folder && e.Data.GetDataPresent(DataFormats.FileDrop))
-                e.Effect = DragDropEffects.Copy;
         }
     }
 
