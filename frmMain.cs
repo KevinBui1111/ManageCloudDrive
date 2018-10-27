@@ -1,6 +1,9 @@
 ﻿using BrightIdeasSoftware;
 using Google.Apis.Auth.OAuth2;
+using Google.Apis.Auth.OAuth2.Flows;
+using Google.Apis.Auth.OAuth2.Responses;
 using Google.Apis.Drive.v3;
+using Google.Apis.Drive.v3.Data;
 using Google.Apis.Services;
 using Google.Apis.Util.Store;
 using KevinHelper;
@@ -17,6 +20,7 @@ using System.IO;
 using System.Linq;
 using System.Runtime.Serialization.Formatters.Binary;
 using System.Text;
+using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Windows.Forms;
@@ -29,6 +33,9 @@ namespace ManageCloudDrive
         const string MsaReturnUrl = "https://login.live.com/oauth20_desktop.srf";
 
         static readonly string[] Scopes = { "onedrive.readonly", "wl.signin" };
+        UserCredential credential;
+        DriveService driveService;
+
         IOneDriveClient oneDriveClient;
         KFile rootLocal, rootCloud;
         KFile currentItem;
@@ -43,7 +50,7 @@ namespace ManageCloudDrive
             InitializeComponent();
         }
 
-        private void Form1_Load(object sender, EventArgs e)
+        private async void Form1_LoadAsync(object sender, EventArgs e)
         {
             SysImageListHelper helper = new SysImageListHelper(olvFiles);
             olvColumn1.ImageGetter = delegate (object o)
@@ -51,9 +58,24 @@ namespace ManageCloudDrive
                 var item = o as KFile;
                 return helper.GetImageIndex(item.Name, item.IsFolder);
             };
+            olvColumn3.AspectGetter = delegate (object o)
+            {
+                var item = (KFile)o;
+                if (item.operation != Operation.NOCHANGE) return item.operation;
+                return null;
+            };
+            olvColumn4.AspectGetter = delegate (object o)
+            {
+                var item = (KFile)o;
+                if (item.IsFolder) return item.CountFile;
+                return null;
+            };
             olvFiles.CustomSorter = delegate (OLVColumn column, SortOrder order) {
                 olvFiles.ListViewItemSorter = new KColumnComparer(column, order);
             };
+
+            cbDrive.SelectedIndex = 0;
+            await get_google_credential();
         }
         private async void frmMain_DragDrop(object sender, DragEventArgs e)
         {
@@ -64,6 +86,8 @@ namespace ManageCloudDrive
             rootLocal.Children.Add(dir);
             dir.Parent = rootLocal;
             show_folder_grid(rootLocal);
+
+            load_local_checksum(dir);
         }
         private void frmMain_DragEnter(object sender, DragEventArgs e)
         {
@@ -73,27 +97,51 @@ namespace ManageCloudDrive
                 e.Effect = DragDropEffects.Copy;
         }
 
-        private async void rbOneDrive_CheckedChanged(object sender, EventArgs e)
+        private async void btnLoadDrive_Click(object sender, EventArgs e)
         {
-            string fileload = rbOneDrive.Checked ? DATA_ONE_DRIVE : DATA_GDRIVE;
+            this.Cursor = Cursors.WaitCursor;
+            string fileload = cbDrive.SelectedIndex == 0 ? DATA_GDRIVE : DATA_ONE_DRIVE;
             try
             {
                 using (var stream = System.IO.File.Open(fileload, FileMode.Open))
                 {
                     BinaryFormatter bformatter = new BinaryFormatter();
-                    rootCloud = (DItem)bformatter.Deserialize(stream);
+                    var driveinfo = (DriveInfo)bformatter.Deserialize(stream);
+                    lbUserinfo.Text = driveinfo.userinfo;
+                    lbStorageamount.Text = driveinfo.storage_amount;
+                    rootCloud = driveinfo.rootCloud;
 
                     show_folder_grid(rootCloud);
+
+                    lbSource.Text = "Local";
                 }
             }
             catch (FileNotFoundException)
             {
-                if (rbOneDrive.Checked)
+                if (cbDrive.SelectedIndex == 1)
                     await OneDrive();
-                else if (rbGDrive.Checked)
+                else if (cbDrive.SelectedIndex == 0)
                     await GDrive();
             }
+            this.Cursor = Cursors.Default;
         }
+        private async void btnLogout_ClickAsync(object sender, EventArgs e)
+        {
+            if (credential != null)
+            {
+                await credential.RevokeTokenAsync(CancellationToken.None);
+                credential = null;
+                driveService = null;
+                btnClearLocal.PerformClick();
+            }
+        }
+        private void btnClearLocal_Click(object sender, EventArgs e)
+        {
+            if (System.IO.File.Exists(DATA_GDRIVE))
+                System.IO.File.Delete(DATA_GDRIVE);
+            lbUserinfo.Text = lbStorageamount.Text = null;
+        }
+
 
         private void btnSaveHash_Click(object sender, EventArgs e)
         {
@@ -101,9 +149,9 @@ namespace ManageCloudDrive
             selected = selected ?? (DItem)rootCloud;
 
             StringBuilder fileContent = new StringBuilder();
-            SaveMD5(selected, null, fileContent);
+            SaveMD5(selected, selected.Name ?? "", fileContent);
 
-            System.IO.File.WriteAllText("res.txt", fileContent.ToString());
+            System.IO.File.WriteAllText($"{selected.Name}.MD5", fileContent.ToString());
             MessageBox.Show("Save hash successfully!");
         }
         private void btnCheckDup_Click(object sender, EventArgs e)
@@ -116,6 +164,14 @@ namespace ManageCloudDrive
         private void btnCompare_Click(object sender, EventArgs e)
         {
             ListComparer c = new ListComparer();
+            c.compareFile = (itemA, itemB) =>
+            {
+                KFile fA = (KFile)itemA;
+                KFile fB = (KFile)itemB;
+                if (string.IsNullOrEmpty(fA.Checksum) || string.IsNullOrEmpty(fB.Checksum))
+                    return -1;
+                return fA.Size == fB.Size && fA.Checksum.Equals(fB.Checksum, StringComparison.OrdinalIgnoreCase) ? 0 : 1;
+            };
             var res = c.CompareFolder(rootLocal.Children[0], currentItem);
             show_folder_grid((KFile)res);
         }
@@ -133,6 +189,9 @@ namespace ManageCloudDrive
                     break;
                 case Operation.DELETE:
                     e.Item.ForeColor = Color.Crimson;
+                    break;
+                case Operation.UNKNOWN:
+                    e.Item.ForeColor = Color.Orange;
                     break;
             }
         }
@@ -152,29 +211,76 @@ namespace ManageCloudDrive
             }
         }
 
-        async Task GDrive()
+        async Task get_google_credential()
         {
-            UserCredential credential;
-
             using (var stream = new FileStream("client_secret.json", FileMode.Open, FileAccess.Read))
             {
-                credential = await GoogleWebAuthorizationBroker
-                    .AuthorizeAsync(
-                        GoogleClientSecrets.Load(stream).Secrets,
-                        new[] { DriveService.Scope.DriveReadonly },
-                        "user",
-                        CancellationToken.None,
-                        new FileDataStore("oauth/drive"))
-                    ;
-                Console.WriteLine("Credential file saved");
+                IAuthorizationCodeFlow flow = new GoogleAuthorizationCodeFlow(new GoogleAuthorizationCodeFlow.Initializer
+                {
+                    ClientSecretsStream = stream,
+                    Scopes = new[] { DriveService.Scope.DriveReadonly },
+                    DataStore = new FileDataStore("oauth/drive")
+                });
+
+                TokenResponse token = await flow.LoadTokenAsync(Environment.UserName, CancellationToken.None);
+                if (token == null) return;
+
+                credential = new UserCredential(flow, Environment.UserName, token);
+
+                //bool res = await credential.RevokeTokenAsync(CancellationToken.None);
+                
             }
 
             // Create Drive API service.
-            var driveService = new DriveService(new BaseClientService.Initializer()
+            driveService = new DriveService(new BaseClientService.Initializer()
             {
                 HttpClientInitializer = credential,
                 ApplicationName = this.GetType().ToString(),
             });
+
+            var req = driveService.About.Get();
+            req.Fields = "user(displayName,photoLink, me, emailAddress), storageQuota(limit,usage), maxImportSizes, maxUploadSize";
+            try
+            {
+                About ab = await req.ExecuteAsync();
+                lbUserinfo.Text = $"{ab.User.DisplayName} - {ab.User.EmailAddress}";
+                lbStorageamount.Text = $"{ab.StorageQuota.Usage.ToReadableSize()}/{ab.StorageQuota.Limit.ToReadableSize()}";
+            }
+            catch(TokenResponseException ex)
+            {
+                credential = null;
+                driveService = null;
+                btnClearLocal.PerformClick();
+            }
+        }
+        async Task GDrive()
+        {
+            if (credential == null)
+            {
+                using (var stream = new FileStream("client_secret.json", FileMode.Open, FileAccess.Read))
+                {
+                    credential = await GoogleWebAuthorizationBroker
+                    .AuthorizeAsync(
+                        stream,
+                        new[] { DriveService.Scope.DriveReadonly },
+                        Environment.UserName,
+                        CancellationToken.None,
+                        new FileDataStore("oauth/drive"))
+                    ;
+                }
+
+                driveService = new DriveService(new BaseClientService.Initializer()
+                {
+                    HttpClientInitializer = credential,
+                    ApplicationName = this.GetType().ToString(),
+                });
+            }
+
+            var req = driveService.About.Get();
+            req.Fields = "user(displayName,photoLink, me, emailAddress), storageQuota(limit,usage), maxImportSizes, maxUploadSize";
+            About ab = await req.ExecuteAsync();
+            lbUserinfo.Text = $"{ab.User.DisplayName} - {ab.User.EmailAddress}";
+            lbStorageamount.Text = $"{ab.StorageQuota.Usage.ToReadableSize()}/{ab.StorageQuota.Limit.ToReadableSize()}";
 
             List<DItem> listfiles = new List<DItem>();
             string pageToken = null;
@@ -222,6 +328,9 @@ namespace ManageCloudDrive
 
             CalculateSize((DItem)rootCloud);
             show_folder_grid(rootCloud);
+
+            lbSource.Text = "Cloud";
+
             SaveData(DATA_GDRIVE);
         }
         async Task OneDrive()
@@ -318,10 +427,9 @@ namespace ManageCloudDrive
             foreach (DItem child in item.Children)
             {
                 if (child.IsFolder)
-                    SaveMD5(child, path == null ? child.Name : path + "\\" + child.Name, fileContent);
+                    SaveMD5(child, Path.Combine(path, child.Name), fileContent);
                 else
-                    fileContent.AppendFormat("{0} *{1}\\{2}", child.Checksum, path, child.Name)
-                        .AppendLine();
+                    fileContent.AppendLine($"{child.Checksum} *{Path.Combine(path, child.Name)}");
             }
         }
         void CalculateSize(DItem item)
@@ -354,7 +462,7 @@ namespace ManageCloudDrive
             using (Stream stream = System.IO.File.Open(name, FileMode.Create))
             {
                 BinaryFormatter bformatter = new BinaryFormatter();
-                bformatter.Serialize(stream, rootCloud);
+                bformatter.Serialize(stream, new DriveInfo { userinfo = lbUserinfo.Text, storage_amount = lbStorageamount.Text, rootCloud = rootCloud });
             }
         }
         void CheckDuplicate(DItem item)
@@ -376,103 +484,48 @@ namespace ManageCloudDrive
                     dicDup[child.Name] = 1;
             }
         }
+
+        private void olvFiles_ItemDrag(object sender, ItemDragEventArgs e)
+        {
+            var selection = olvFiles.SelectedObjects.Cast<KFile>().Where(f => !(f is DItem)).Select(f => f.Path).ToArray();
+            if (selection.Length == 0) return;
+            DataObject data = new DataObject(DataFormats.FileDrop, selection);
+            this.AllowDrop = false;
+            this.DoDragDrop(data, DragDropEffects.Copy | DragDropEffects.Move);
+            this.AllowDrop = true;
+        }
+
+        void load_local_checksum(KFile item)
+        {
+            string root = Path.GetDirectoryName(item.Path);
+            string file_checksum = Path.Combine(root, $"{item.Name}.MD5");
+            if (!System.IO.File.Exists(file_checksum)) return;
+
+            Dictionary<string, string> dic_checksum = new Dictionary<string, string>();
+            const string record_pattern_md5 = @"^(\w{32}) \*(.+)$";
+            using (var stream = System.IO.File.OpenText(file_checksum))
+            {
+                while (!stream.EndOfStream)
+                {
+                    string line = stream.ReadLine();
+                    Match m = Regex.Match(line, record_pattern_md5);
+                    if (m.Success)
+                        dic_checksum[Path.Combine(root, m.Groups[2].Value)] = m.Groups[1].Value;
+                }
+            }
+
+            update_checksum(item);
+
+            void update_checksum(KFile folder)
+            {
+                foreach (KFile child in folder.Children)
+                {
+                    if (child.IsFolder)
+                        update_checksum(child);
+                    else if (dic_checksum.TryGetValue(child.Path, out string cs))
+                        child.Checksum = cs;
+                }
+            }
+        }
     }
-
-    public class KColumnComparer : IComparer
-    {
-        /// <summary>
-        /// Gets or sets the method that will be used to compare two strings.
-        /// The default is to compare on the current culture, case-insensitive
-        /// </summary>
-        public static StringCompareDelegate StringComparer
-        {
-            get { return stringComparer; }
-            set { stringComparer = value; }
-        }
-        private static StringCompareDelegate stringComparer;
-
-        /// <summary>
-        /// Create a ColumnComparer that will order the rows in a list view according
-        /// to the values in a given column
-        /// </summary>
-        /// <param name="col">The column whose values will be compared</param>
-        /// <param name="order">The ordering for column values</param>
-        public KColumnComparer(OLVColumn col, SortOrder order)
-        {
-            this.column = col;
-            this.sortOrder = order;
-        }
-
-        /// <summary>
-        /// Compare two rows
-        /// </summary>
-        /// <param name="x">row1</param>
-        /// <param name="y">row2</param>
-        /// <returns>An ordering indication: -1, 0, 1</returns>
-        public int Compare(object x, object y)
-        {
-            return this.Compare((KFile)((OLVListItem)x).RowObject, (KFile)((OLVListItem)y).RowObject);
-        }
-
-        /// <summary>
-        /// Compare two rows
-        /// </summary>
-        /// <param name="x">row1</param>
-        /// <param name="y">row2</param>
-        /// <returns>An ordering indication: -1, 0, 1</returns>
-        public int Compare(KFile x, KFile y)
-        {
-            if (this.sortOrder == SortOrder.None)
-                return 0;
-
-            if (x.Name == "..")
-                return -1;
-            else if (y.Name == "..")
-                return 1;
-
-            int fol = x.IsFolder.CompareTo(y.IsFolder);
-            if (fol != 0) return -fol;
-
-            int result = 0;
-            object x1 = this.column.GetValue(x);
-            object y1 = this.column.GetValue(y);
-
-            // Handle nulls. Null values come last
-            bool xIsNull = (x1 == null || x1 == System.DBNull.Value);
-            bool yIsNull = (y1 == null || y1 == System.DBNull.Value);
-            
-            if (xIsNull && yIsNull)
-                result = 0;
-            else if(xIsNull || yIsNull)
-                result = (xIsNull ? -1 : 1);
-            else
-                result = this.CompareValues(x1, y1);
-
-            if (this.sortOrder == SortOrder.Descending)
-                result = 0 - result;
-
-            return result;
-        }
-
-        /// <summary>
-        /// Compare the actual values to be used for sorting
-        /// </summary>
-        /// <param name="x">The aspect extracted from the first row</param>
-        /// <param name="y">The aspect extracted from the second row</param>
-        /// <returns>An ordering indication: -1, 0, 1</returns>
-        public int CompareValues(object x, object y)
-        {
-            // Force case insensitive compares on strings
-            String xAsString = x as String;
-            if (xAsString != null)
-                return String.Compare(xAsString, y as String, StringComparison.CurrentCultureIgnoreCase);
-
-            IComparable comparable = x as IComparable;
-            return comparable != null ? comparable.CompareTo(y) : 0;
-        }
-
-        private OLVColumn column;
-        private SortOrder sortOrder;
-    }
-
 }
