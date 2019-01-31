@@ -168,9 +168,15 @@ namespace ManageCloudDrive
             {
                 KFile fA = (KFile)itemA;
                 KFile fB = (KFile)itemB;
+
+                if (fA.Size != fB.Size)
+                    return Operation.CHANGED;
                 if (string.IsNullOrEmpty(fA.Checksum) || string.IsNullOrEmpty(fB.Checksum))
-                    return -1;
-                return fA.Size == fB.Size && fA.Checksum.Equals(fB.Checksum, StringComparison.OrdinalIgnoreCase) ? 0 : 1;
+                    return Operation.UNKNOWN;
+                if (fA.Checksum.Equals(fB.Checksum, StringComparison.OrdinalIgnoreCase))
+                    return Operation.NOCHANGE;
+                else
+                    return Operation.CHANGED;
             };
             var res = c.CompareFolder(rootLocal.Children[0], currentItem);
             show_folder_grid((KFile)res);
@@ -290,23 +296,35 @@ namespace ManageCloudDrive
                 FilesResource.ListRequest request = driveService.Files.List();
                 request.Fields = "nextPageToken, files(id,name,size,mimeType,parents,webViewLink,md5Checksum,createdTime)";
                 request.Spaces = "drive";
-                request.Q = "trashed = false";
+                request.Q = "trashed = false and 'me' in owners";
                 request.PageToken = pageToken;
                 request.PageSize = 1000;
 
                 // List files.
                 var result = await request.ExecuteAsync();
-                listfiles.AddRange(result.Files.Select(f => new DItem
+                listfiles.AddRange(result.Files.Select(f =>
                 {
-                    Id = f.Id,
-                    Name = f.Name,
-                    Size = f.Size,
-                    IsFolder = f.MimeType == "application/vnd.google-apps.folder",
-                    Checksum = f.Md5Checksum,
-                    CreatedDate = f.CreatedTime.Value,
+                    try
+                    {
+                        var x = new DItem
+                        {
+                            Id = f.Id,
+                            Name = f.Name,
+                            Size = f.Size,
+                            IsFolder = f.MimeType == "application/vnd.google-apps.folder",
+                            Checksum = f.Md5Checksum,
+                            CreatedDate = f.CreatedTime.Value,
 
-                    ParentId = f.Parents[0],
-                    WebUrl = f.WebViewLink
+                            ParentId = f.Parents[0],
+                            WebUrl = f.WebViewLink
+                        };
+                        return x;
+                    }
+                    catch(Exception ex)
+                    {
+                        var a = ex;
+                        return null;
+                    }
                 }));
 
                 pageToken = result.NextPageToken;
