@@ -520,7 +520,7 @@ namespace ManageCloudDrive
             if (!System.IO.File.Exists(file_checksum)) return;
 
             Dictionary<string, string> dic_checksum = new Dictionary<string, string>();
-            const string record_pattern_md5 = @"^(\w{32}) \*(.+)$";
+            const string record_pattern_md5 = @"^(\w{32}) \*?(.+)$";
             using (var stream = System.IO.File.OpenText(file_checksum))
             {
                 while (!stream.EndOfStream)
