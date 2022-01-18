@@ -294,15 +294,15 @@ namespace ManageCloudDrive
             {
                 // Define parameters of request.
                 FilesResource.ListRequest request = driveService.Files.List();
-                request.Fields = "nextPageToken, files(id,name,size,mimeType,parents,webViewLink,md5Checksum,createdTime)";
+                request.Fields = "nextPageToken, files(id,name,size,mimeType,parents,webViewLink,md5Checksum,createdTime,ownedByMe)";
                 request.Spaces = "drive";
-                request.Q = "trashed = false and 'me' in owners";
+                request.Q = "(trashed = false) and ('me' in owners)";
                 request.PageToken = pageToken;
                 request.PageSize = 1000;
 
                 // List files.
                 var result = await request.ExecuteAsync();
-                listfiles.AddRange(result.Files.Select(f =>
+                listfiles.AddRange(result.Files.Where(f => f.OwnedByMe == true).Select(f =>
                 {
                     try
                     {
